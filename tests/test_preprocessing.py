@@ -1,12 +1,13 @@
 """
-tests/test_preprocessing.py
-============================
-data/preprocessing.py için birim testleri.
+tests/test_labeling_protocol.py
+=================================
+data/labeling_protocol.py için birim testleri.
 
-En kritik test `test_offline_online_window_count_matches` - bu proje
-için sadece bir "nice to have" değil, mimarinin temel iddiasının
-doğrulamasıdır: offline ve online mod aynı sayıda ve aynı boyutta
-pencere üretmeli, çünkü ikisi de aynı `push()` çekirdeğini kullanıyor.
+En kritik testler:
+  - test_guard_band_windows_are_excluded: "ground truth netliği" kısıtının
+    fiilen uygulandığını kanıtlar (geçiş anına yakın pencereler ele alınmaz)
+  - test_build_labeled_dataset_preserves_plant_id: bitki-bazlı CV'nin
+    ihtiyaç duyduğu bilginin kaybolmadığını kanıtlar
 """
 
 from __future__ import annotations
@@ -14,154 +15,164 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from config import FilterConfig, WindowConfig
-from data.preprocessing import (
-    HighPassFilter,
-    PreprocessingPipeline,
-    SlidingWindower,
+from config import StimulusLabel, WindowConfig
+from data.labeling_protocol import (
+    ProtocolMinimums,
+    Trial,
+    build_labeled_dataset,
+    label_window,
+    validate_dataset_protocol,
 )
 
 
+def make_trial(**overrides) -> Trial:
+    """Testlerde tekrar tekrar yazmamak için makul varsayılanlarla bir
+    Trial üreten yardımcı fabrika fonksiyonu."""
+    defaults = dict(
+        trial_id="t1",
+        plant_id="plant_0",
+        label=StimulusLabel.MECHANICAL_TOUCH,
+        sampling_rate_hz=100.0,
+        stimulus_onset_time_s=120.0,
+        baseline_duration_s=120.0,
+        post_stimulus_duration_s=120.0,
+        guard_band_s=2.0,
+    )
+    defaults.update(overrides)
+    return Trial(**defaults)
+
+
 # ---------------------------------------------------------------------------
-# SlidingWindower testleri
+# Trial doğrulama testleri
 # ---------------------------------------------------------------------------
-class TestSlidingWindower:
-    def test_no_window_before_buffer_full(self):
-        """Tampon dolmadan hiçbir pencere üretilmemeli."""
-        windower = SlidingWindower(WindowConfig(window_size=10, hop_size=10))
-        for i in range(9):
-            assert windower.push(float(i)) is None
-
-    def test_first_window_shape(self):
-        """İlk pencere tam window_size uzunluğunda olmalı."""
-        windower = SlidingWindower(WindowConfig(window_size=10, hop_size=10))
-        window = None
-        for i in range(10):
-            window = windower.push(float(i))
-        assert window is not None
-        assert window.shape == (10,)
-        np.testing.assert_array_equal(window, np.arange(10, dtype=np.float64))
-
-    def test_non_overlapping_window_count(self):
-        """hop_size == window_size iken örtüşme olmamalı; N örnekten
-        N // window_size tam pencere çıkmalı."""
-        window_size = 100
-        windower = SlidingWindower(WindowConfig(window_size=window_size, hop_size=window_size))
-        n_samples = 350
-        count = sum(1 for i in range(n_samples) if windower.push(float(i)) is not None)
-        assert count == n_samples // window_size  # 3
-
-    def test_overlapping_window_count(self):
-        """hop_size < window_size iken örtüşme sonucu daha fazla pencere
-        üretilmeli (örn. %50 overlap -> yaklaşık 2 katı pencere)."""
-        window_size, hop_size = 100, 50
-        windower = SlidingWindower(WindowConfig(window_size=window_size, hop_size=hop_size))
-        n_samples = 350
-        count = sum(1 for i in range(n_samples) if windower.push(float(i)) is not None)
-        # ilk pencere 100. örnekte, sonrakiler her 50 örnekte bir
-        expected = (n_samples - window_size) // hop_size + 1
-        assert count == expected
-
-    def test_returned_window_is_independent_copy(self):
-        """Döndürülen pencere, tamponun canlı referansı DEĞİL, bağımsız
-        bir kopya olmalı (aksi halde bir sonraki push çağrısı, çağıranın
-        elindeki pencereyi sessizce bozar)."""
-        windower = SlidingWindower(WindowConfig(window_size=5, hop_size=5))
-        window = None
-        for i in range(5):
-            window = windower.push(float(i))
-        snapshot = window.copy()
-        for i in range(5, 10):
-            windower.push(float(i))
-        np.testing.assert_array_equal(window, snapshot)
-
-    def test_invalid_hop_size_raises(self):
+class TestTrialValidation:
+    def test_baseline_label_rejected(self):
+        """Bir trial'ın kendi uyaran sınıfı BASELINE olamaz (baseline
+        otomatik olarak uyaran-öncesi pencerelere atanır)."""
         with pytest.raises(ValueError):
-            SlidingWindower(WindowConfig(window_size=10, hop_size=0))
+            make_trial(label=StimulusLabel.BASELINE)
+
+    def test_below_minimum_baseline_duration_rejected(self):
         with pytest.raises(ValueError):
-            SlidingWindower(WindowConfig(window_size=10, hop_size=11))
+            make_trial(baseline_duration_s=10.0, stimulus_onset_time_s=10.0)
 
-    def test_reset_clears_state(self):
-        windower = SlidingWindower(WindowConfig(window_size=5, hop_size=5))
-        for i in range(5):
-            windower.push(float(i))
-        windower.reset()
-        for i in range(4):
-            assert windower.push(float(i)) is None
+    def test_below_minimum_post_stimulus_duration_rejected(self):
+        with pytest.raises(ValueError):
+            make_trial(post_stimulus_duration_s=10.0)
+
+    def test_onset_before_baseline_end_rejected(self):
+        """Uyaran, baseline süresi dolmadan gerçekleşemez (kayıt onset'ten
+        önce en az baseline_duration_s kadar sürmüş olmalı)."""
+        with pytest.raises(ValueError):
+            make_trial(stimulus_onset_time_s=50.0, baseline_duration_s=120.0)
 
 
 # ---------------------------------------------------------------------------
-# HighPassFilter testleri
+# label_window - çekirdek zaman-tabanlı etiketleme testleri
 # ---------------------------------------------------------------------------
-class TestHighPassFilter:
-    def test_dc_component_is_attenuated_offline(self):
-        """Sabit (DC, 0 Hz) bir sinyal, yüksek geçiren filtreden sonra
-        neredeyse sıfıra yaklaşmalı (tanım gereği 0 Hz her zaman kesim
-        frekansının altındadır)."""
+class TestLabelWindow:
+    def test_window_before_onset_is_baseline(self):
+        """Onset'ten (120s) tamamen önce biten bir pencere baseline olmalı."""
+        trial = make_trial(stimulus_onset_time_s=120.0, guard_band_s=2.0)
+        wc = WindowConfig(window_size=1000, hop_size=1000)  # fs=100Hz -> 10s pencere
+        # window_index=5 -> [50s, 60s) -> guard_start=118s'den önce bitiyor
+        assert label_window(trial, window_index=5, window_config=wc) == StimulusLabel.BASELINE
+
+    def test_window_after_guard_is_stimulus_label(self):
+        """Guard band'den tamamen sonra başlayan bir pencere trial'ın
+        uyaran sınıfıyla etiketlenmeli."""
+        trial = make_trial(stimulus_onset_time_s=120.0, guard_band_s=2.0)
+        wc = WindowConfig(window_size=1000, hop_size=1000)
+        # window_index=13 -> [130s, 140s) -> guard_end=122s'den sonra başlıyor
+        assert label_window(trial, window_index=13, window_config=wc) == trial.label
+
+    def test_guard_band_window_is_excluded(self):
+        """Onset anını (120s) içine alan pencere guard band'e denk gelir
+        ve None dönmeli (belirsiz, veri setine dahil edilmemeli)."""
+        trial = make_trial(stimulus_onset_time_s=120.0, guard_band_s=2.0)
+        wc = WindowConfig(window_size=1000, hop_size=1000)
+        # window_index=12 -> [120s, 130s) -> guard_start=118, guard_end=122
+        # pencere guard_end'i (122s) kesiyor -> ne tam öncesi ne tam sonrası
+        assert label_window(trial, window_index=12, window_config=wc) is None
+
+    def test_window_outside_trial_bounds_is_none(self):
+        """Trial'ın tanımlı kayıt aralığının (baseline_start..post_end)
+        tamamen dışında kalan pencere None dönmeli."""
+        trial = make_trial(
+            stimulus_onset_time_s=120.0, baseline_duration_s=120.0, post_stimulus_duration_s=120.0
+        )
+        wc = WindowConfig(window_size=1000, hop_size=1000)
+        # window_index=30 -> [300s, 310s) -> post_end=240s'i çoktan geçmiş
+        assert label_window(trial, window_index=30, window_config=wc) is None
+
+
+# ---------------------------------------------------------------------------
+# build_labeled_dataset - uçtan uca entegrasyon testleri
+# ---------------------------------------------------------------------------
+class TestBuildLabeledDataset:
+    def test_build_labeled_dataset_preserves_plant_id(self):
+        """Üretilen her LabeledWindow, hangi bitkiden geldiğini doğru
+        taşımalı - bitki-bazlı cross-validation buna bağımlı."""
         fs = 100.0
-        dc_signal = np.full(2000, fill_value=3.0)
-        hpf = HighPassFilter(FilterConfig(cutoff_hz=0.5, order=4), sampling_rate_hz=fs)
-        filtered = hpf.process_offline(dc_signal)
-        # Filtrenin oturması için başlangıç kısmını atlayıp son kısma bakıyoruz
-        assert np.abs(filtered[-500:]).max() < 0.05
-
-    def test_invalid_cutoff_raises(self):
-        """Kesim frekansı Nyquist limitini aşarsa (fs/2) hata vermeli."""
-        with pytest.raises(ValueError):
-            HighPassFilter(FilterConfig(cutoff_hz=60.0), sampling_rate_hz=100.0)  # 60 > 50 (Nyquist)
-
-    def test_online_push_matches_offline_length(self):
-        """Online modda örnek-örnek filtrelenen sinyal, offline filtrelenen
-        sinyalle aynı uzunlukta olmalı (örnek kaybı/tekrar olmamalı)."""
-        fs = 100.0
+        onset = 120.0
+        duration_s = onset + 120.0
+        n_samples = int(duration_s * fs)
         rng = np.random.default_rng(0)
-        signal = rng.normal(size=500)
 
-        hpf_offline = HighPassFilter(sampling_rate_hz=fs)
-        offline_result = hpf_offline.process_offline(signal)
-
-        hpf_online = HighPassFilter(sampling_rate_hz=fs)
-        online_result = np.array([hpf_online.push(float(s)) for s in signal])
-
-        assert len(online_result) == len(offline_result) == len(signal)
-
-
-# ---------------------------------------------------------------------------
-# PreprocessingPipeline - offline/online PARİTE testi (en kritik test)
-# ---------------------------------------------------------------------------
-class TestPreprocessingPipelineParity:
-    def test_offline_online_window_count_matches(self):
-        """PROJENİN TEMEL MİMARİ İDDİASI: aynı sinyal offline ve online
-        modda işlendiğinde, AYNI SAYIDA pencere üretilmeli.
-
-        Bu test kırılırsa, offline eğitim ile online inference'ın farklı
-        veri gördüğü anlamına gelir (train/serve skew) - bu ciddi bir
-        regresyon sinyalidir.
-        """
-        fs = 100.0
-        rng = np.random.default_rng(1)
-        n_samples = 5000
+        trial = make_trial(
+            trial_id="t_plantA", plant_id="plant_A", sampling_rate_hz=fs, stimulus_onset_time_s=onset
+        )
         signal = rng.normal(size=n_samples)
 
-        offline_pipeline = PreprocessingPipeline(sampling_rate_hz=fs)
-        offline_windows = offline_pipeline.process_offline(signal)
+        dataset = build_labeled_dataset([trial], {"t_plantA": signal})
 
-        online_pipeline = PreprocessingPipeline(sampling_rate_hz=fs)
-        online_windows = [
-            w for s in signal if (w := online_pipeline.process_sample(float(s))) is not None
-        ]
+        assert len(dataset) > 0
+        assert all(lw.plant_id == "plant_A" for lw in dataset)
+        assert all(lw.trial_id == "t_plantA" for lw in dataset)
 
-        assert len(offline_windows) == len(online_windows)
-        for ow, onw in zip(offline_windows, online_windows):
-            assert ow.samples.shape == onw.samples.shape == (1024,)
-
-    def test_reset_allows_fresh_session(self):
-        """reset() sonrası pipeline, sanki hiç veri görmemiş gibi
-        davranmalı (yeni bir bitki/oturuma geçişi simüle eder)."""
+    def test_labels_present_are_only_baseline_or_trial_label(self):
+        """Üretilen etiketler sadece BASELINE veya trial'ın kendi uyaran
+        sınıfı olmalı - guard band'e denk gelenler zaten elenmiş olmalı."""
         fs = 100.0
-        pipeline = PreprocessingPipeline(sampling_rate_hz=fs, window_config=WindowConfig(window_size=10, hop_size=10))
-        for i in range(10):
-            pipeline.process_sample(float(i))
-        pipeline.reset()
-        for i in range(9):
-            assert pipeline.process_sample(float(i)) is None
+        onset = 120.0
+        n_samples = int((onset + 120.0) * fs)
+        rng = np.random.default_rng(1)
+
+        trial = make_trial(sampling_rate_hz=fs, stimulus_onset_time_s=onset)
+        dataset = build_labeled_dataset([trial], {trial.trial_id: rng.normal(size=n_samples)})
+
+        found_labels = {lw.label for lw in dataset}
+        assert found_labels <= {StimulusLabel.BASELINE, trial.label}
+
+    def test_missing_raw_signal_raises_key_error(self):
+        trial = make_trial()
+        with pytest.raises(KeyError):
+            build_labeled_dataset([trial], {})
+
+
+# ---------------------------------------------------------------------------
+# validate_dataset_protocol testleri
+# ---------------------------------------------------------------------------
+class TestValidateDatasetProtocol:
+    def test_insufficient_repeats_produces_warning(self):
+        trials = [
+            make_trial(trial_id=f"t{i}", plant_id=f"plant_{i % 3}")
+            for i in range(5)  # asgari 20'nin altında
+        ]
+        warnings = validate_dataset_protocol(trials)
+        assert any("tekrar" in w for w in warnings)
+
+    def test_insufficient_plants_produces_warning(self):
+        trials = [
+            make_trial(trial_id=f"t{i}", plant_id="only_one_plant")
+            for i in range(ProtocolMinimums.MIN_REPEATS_PER_CLASS)
+        ]
+        warnings = validate_dataset_protocol(trials)
+        assert any("bitki" in w for w in warnings)
+
+    def test_sufficient_data_produces_no_warnings(self):
+        trials = [
+            make_trial(trial_id=f"t{i}", plant_id=f"plant_{i % 4}")
+            for i in range(ProtocolMinimums.MIN_REPEATS_PER_CLASS)
+        ]
+        assert validate_dataset_protocol(trials) == []
