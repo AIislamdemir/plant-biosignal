@@ -18,6 +18,7 @@ from models.classical_models import (
     TrainedModel,
     evaluate_models_grouped_cv,
     get_available_model_names,
+    get_out_of_fold_predictions,
     summarize_cv_results,
     train_final_model,
 )
@@ -145,6 +146,40 @@ class TestGroupedCrossValidation:
 # ---------------------------------------------------------------------------
 # Nihai model eğitimi testleri
 # ---------------------------------------------------------------------------
+class TestGetOutOfFoldPredictions:
+    def test_returns_arrays_of_equal_length(self):
+        """y_true, y_pred ve groups AYNI uzunlukta olmali - her satir
+        birbirine karsilik gelen tek bir test-fold ornegini temsil eder."""
+        X, y, groups = make_synthetic_dataset(n_plants=5)
+        y_true, y_pred, groups_ordered = get_out_of_fold_predictions(
+            "decision_tree", X, y, groups, n_splits=5
+        )
+        assert len(y_true) == len(y_pred) == len(groups_ordered) == len(y)
+
+    def test_predictions_use_original_string_labels(self):
+        """Donen tahminler sayisal kod (0,1,2..) DEGIL, orijinal string
+        etiketler (orn. 'baseline') olmali - label_encoder.inverse_transform
+        dogru calismis mi diye kontrol."""
+        X, y, groups = make_synthetic_dataset(n_plants=5)
+        y_true, y_pred, _ = get_out_of_fold_predictions("decision_tree", X, y, groups, n_splits=5)
+        assert set(y_true) <= {"baseline", "mechanical_touch"}
+        assert set(y_pred) <= {"baseline", "mechanical_touch"}
+
+    def test_every_row_is_out_of_fold_i_e_unseen_during_its_own_training(self):
+        """OOF tahminin anlami: model, o ornegi HIC gormeden tahmin
+        uretmis olmali. Bunu dogrudan test etmek zor, ama dolayli bir
+        kontrol yapabiliriz: y_true her zaman orijinal y ile AYNI COKLU
+        KUMEYI (multiset) icermeli - hicbir ornek atlanmamis/eklenmemis."""
+        X, y, groups = make_synthetic_dataset(n_plants=5)
+        y_true, _, _ = get_out_of_fold_predictions("decision_tree", X, y, groups, n_splits=5)
+        assert sorted(y_true) == sorted(y)
+
+    def test_unknown_model_name_raises(self):
+        X, y, groups = make_synthetic_dataset(n_plants=4)
+        with pytest.raises(ValueError, match="Bilinmeyen model"):
+            get_out_of_fold_predictions("not_a_real_model", X, y, groups)
+
+
 class TestTrainFinalModel:
     def test_train_final_model_returns_usable_predictor(self):
         X, y, groups = make_synthetic_dataset(n_plants=4)

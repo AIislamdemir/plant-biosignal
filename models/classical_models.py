@@ -93,6 +93,18 @@ def _build_model_registry(random_state: int = 42) -> dict[str, Callable[[], Clas
     return registry
 
 
+def get_model_registry(random_state: int = 42) -> dict[str, Callable[[], ClassifierMixin]]:
+    """_build_model_registry()'nin PUBLIC (dışarıya açık) versiyonu.
+
+    utils/metrics.py gibi diğer modüllerin, bir model FABRİKASINI
+    (nesneyi değil) alıp kendi CV/analiz akışlarında (örn.
+    cross_val_predict ile out-of-fold tahmin üretmek için) kullanabilmesi
+    için eklendi. _build_model_registry ile aynı sözlüğü döndürür; bu
+    sadece isimlendirme sözleşmesini netleştiren ince bir sarmalayıcı.
+    """
+    return _build_model_registry(random_state)
+
+
 def get_available_model_names(random_state: int = 42) -> tuple[str, ...]:
     """Şu an ortamda kullanılabilir model isimlerini döndürür (xgboost
     kurulu değilse listede görünmez). CLI/notebook'ta 'hangi modeller
@@ -254,6 +266,81 @@ def train_final_model(
     model.fit(X, y_encoded)
 
     return TrainedModel(model_name=model_name, model=model, label_encoder=label_encoder)
+
+
+# ---------------------------------------------------------------------------
+# 4) Fold'lar arası ham tahminlerin toplanması (utils/metrics.py için)
+# ---------------------------------------------------------------------------
+def get_out_of_fold_predictions(
+    model_name: str,
+    X: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    n_splits: int = 5,
+    resampler: Optional[Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]] = None,
+    random_state: int = 42,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """TEK bir model için, GroupKFold'un TÜM fold'larındaki test tahminlerini
+    toplayıp tek bir (y_true, y_pred, groups) üçlüsü olarak döndürür.
+
+    Neden evaluate_models_grouped_cv()'den AYRI bir fonksiyon?
+    ---------------------------------------------------------------
+    evaluate_models_grouped_cv() sadece ÖZET skorları (accuracy, f1_macro)
+    saklıyor - ham tahminleri atıyor. Bu, çoğu zaman yeterli ama karışıklık
+    matrisi veya sınıf-bazlı recall/precision görmek istediğinde (bkz.
+    utils/metrics.py) HAM (gerçek, tahmin) çiftlerine ihtiyaç var. Mevcut,
+    test edilmiş fonksiyonun imzasını/davranışını bozmamak için bunu YENİ
+    bir fonksiyon olarak ekliyorum - regresyon riski yok.
+
+    "Out-of-fold" (OOF) tahmin ne demek?
+    Her örnek için, o örneğin bulunduğu fold TEST'teyken üretilen tahmin
+    kullanılıyor - yani her tahmin, o modelin o örneği HİÇ GÖRMEDEN yaptığı
+    bir tahmin. Bu yüzden tüm veri seti üzerinde tarafsız bir performans
+    resmi çizer (train setindeki "ezberlenmiş" tahminler karışmaz).
+    """
+    n_unique_groups = len(np.unique(groups))
+    effective_n_splits = min(n_splits, n_unique_groups)
+    if effective_n_splits < 2:
+        raise ValueError(
+            f"GroupKFold en az 2 farklı grup (bitki) gerektirir, "
+            f"veri setinde sadece {n_unique_groups} farklı bitki var."
+        )
+
+    registry = _build_model_registry(random_state)
+    if model_name not in registry:
+        raise ValueError(
+            f"Bilinmeyen model adı: '{model_name}'. Kullanılabilir: {list(registry.keys())}"
+        )
+
+    label_encoder = LabelEncoder()
+    y_encoded = label_encoder.fit_transform(y)
+
+    splitter = GroupKFold(n_splits=effective_n_splits)
+    y_true_all, y_pred_all, groups_all = [], [], []
+
+    for train_idx, test_idx in splitter.split(X, y_encoded, groups=groups):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y_encoded[train_idx], y_encoded[test_idx]
+
+        if resampler is not None:
+            X_train, y_train = resampler(X_train, y_train)
+
+        model = registry[model_name]()
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+
+        y_true_all.append(y_test)
+        y_pred_all.append(y_pred)
+        groups_all.append(groups[test_idx])
+
+    # Sayısal kodları geri, insan-okunur string etiketlere çeviriyoruz
+    # (örn. 0 -> "baseline") - utils/metrics.py'nin okunabilir bir
+    # karışıklık matrisi üretebilmesi için.
+    y_true_labels = label_encoder.inverse_transform(np.concatenate(y_true_all))
+    y_pred_labels = label_encoder.inverse_transform(np.concatenate(y_pred_all))
+    groups_ordered = np.concatenate(groups_all)
+
+    return y_true_labels, y_pred_labels, groups_ordered
 
 
 if __name__ == "__main__":
