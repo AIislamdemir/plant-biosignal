@@ -38,12 +38,12 @@ plant_biosignal/
 │   ├── preprocessing.py           # IIR yüksek geçiren filtre + sliding window
 │   │                               # (offline/online ortak çekirdek)
 │   ├── labeling_protocol.py       # Zaman-bazlı, guard-band'li otomatik etiketleme
-│   └── signal_acquisition.py      # [planlanan] Donanım (ADC) arayüzü
+│   └── signal_acquisition.py      # Donanım (Plant SpikerBox/seri port) + simülasyon kaynağı
 │
 ├── features/
 │   ├── statistical_features.py    # mean, variance, min, max, skewness, kurtosis
 │   ├── tsfresh_features.py        # [planlanan] Genişletilmiş özellik seti
-│   └── mfcc_features.py           # [planlanan] Frekans-tabanlı özellikler
+│   └── mfcc_features.py           # Mel-frekans kepstral katsayıları (elle, librosa'sız)
 │
 ├── models/
 │   ├── classical_models.py        # RF, SVC, GP, DT, GaussianNB, KNN, XGBoost
@@ -166,7 +166,9 @@ pytest tests/ -v
 
 Uçtan uca zincir (ham sinyal → etiketleme → özellik çıkarımı → model →
 gerçek zamanlı tahmin) çalışır durumda ve `inference.py`'deki demo ile
-doğrulandı. Henüz eklenmemiş modüller yukarıdaki mimari şemada
-`[planlanan]` olarak işaretlendi. Donanım entegrasyonu
-(`data/signal_acquisition.py`) için Backyard Brains Plant SpikerBox
-referans alınması planlanıyor.
+doğrulandı. `data/signal_acquisition.py`, Backyard Brains Plant
+SpikerBox'ı (seri port üzerinden) ve donanımsız test/geliştirme için bir
+simülasyon kaynağını aynı `SignalSource` arayüzü altında sunuyor - gerçek
+donanım geldiğinde `inference.py` hiç değişmeden çalışmaya devam edecek.
+Henüz eklenmemiş modüller yukarıdaki mimari şemada `[planlanan]` olarak
+işaretlendi.

@@ -151,7 +151,31 @@ class RealtimeConfig:
 
 
 # ---------------------------------------------------------------------------
-# 6) Dosya yolları
+# 6) MFCC (mel-frekans kepstral katsayıları) parametreleri
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class MFCCConfig:
+    """features/mfcc_features.py için parametreler.
+
+    ŞEFFAFLİK NOTU: "Mel" skalası, orijinal olarak İNSAN İŞİTME
+    algısının frekansları doğrusal değil logaritmik-benzeri algıladığı
+    gözlemine dayanır (ses/konuşma işlemeden ödünç alınmış bir yöntem).
+    Bitkinin bu frekans aralığını "mel skalasında algıladığı" gibi bir
+    biyolojik iddiamız YOK - burada mel-warped filtrebank, literatürde
+    (prompt'ta belirtildiği gibi) ampirik olarak frekans modülasyonunu
+    yakalamada işe yaradığı gösterildiği için, ses işlemeden ödünç
+    alınmış bir sinyal işleme YÖNTEMİ olarak kullanılıyor - biyolojik
+    bir varsayım değil.
+    """
+
+    n_mfcc: int = 13              # tutulacak kepstral katsayı sayısı
+    n_mel_filters: int = 26       # mel-warped üçgen filtre sayısı
+    low_freq_hz: float = 0.0
+    high_freq_hz: Optional[float] = None  # None -> otomatik olarak Nyquist (fs/2)
+
+
+# ---------------------------------------------------------------------------
+# 7) Dosya yolları
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class PathConfig:
@@ -162,7 +186,7 @@ class PathConfig:
 
 
 # ---------------------------------------------------------------------------
-# 7) Hepsini bir araya getiren üst-config
+# 8) Hepsini bir araya getiren üst-config
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ProjectConfig:
@@ -170,6 +194,7 @@ class ProjectConfig:
     filter: FilterConfig = field(default_factory=FilterConfig)
     window: WindowConfig = field(default_factory=WindowConfig)
     realtime: RealtimeConfig = field(default_factory=RealtimeConfig)
+    mfcc: MFCCConfig = field(default_factory=MFCCConfig)
     paths: PathConfig = field(default_factory=PathConfig)
 
 
