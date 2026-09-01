@@ -42,7 +42,7 @@ plant_biosignal/
 │
 ├── features/
 │   ├── statistical_features.py    # mean, variance, min, max, skewness, kurtosis
-│   ├── tsfresh_features.py        # [planlanan] Genişletilmiş özellik seti
+│   ├── tsfresh_features.py        # Genişletilmiş özellik seti (SADECE offline keşif için)
 │   └── mfcc_features.py           # Mel-frekans kepstral katsayıları (elle, librosa'sız)
 │
 ├── models/
@@ -54,7 +54,7 @@ plant_biosignal/
 │
 ├── utils/
 │   ├── metrics.py                 # Karışıklık matrisi, sınıf-bazlı rapor
-│   └── visualization.py           # [planlanan] Canlı gösterge
+│   └── visualization.py           # Sinyal grafikleri, özellik önemi, canlı gösterge (LiveMonitor)
 │
 ├── inference.py                   # Gerçek zamanlı sınıflandırma motoru
 │
@@ -78,6 +78,16 @@ bazı sayısal parametreler, kaynak makalelerde birebir raporlanmadığı için
 mühendislik pratiğine dayalı başlangıç değerleridir — makalelerden alınmış
 kesin sayılar olarak sunulmamıştır, gerçek deney verisiyle
 tune edilmesi gerekir.
+
+**Mühendislik değiş-tokuşu notu — neden tsfresh gerçek zamanlı yolda değil:**
+`features/tsfresh_features.py`, bilinçli olarak `inference.py`'ye
+bağlanmadı. Ölçüm: `MinimalFCParameters` seti, `statistical_features.py`
+ile aynı mertebede hızlı (~0.5 ms/pencere), ama `EfficientFCParameters`
+setine geçildiğinde maliyet ~150 kat artıyor (~108 ms/pencere). Bu, projenin
+"pencere başına sınıflandırma süresi, pencere uzunluğundan kısa olmalı"
+performans hedefini riske atabilir — bu yüzden tsfresh SADECE offline
+keşif/karşılaştırma amaçlı tutuldu, gerçek zamanlı sistem ucuz özellik
+setlerini (statistical/MFCC) kullanmaya devam ediyor.
 
 ## Bilimsel kısıtlar (nasıl uygulandı)
 
